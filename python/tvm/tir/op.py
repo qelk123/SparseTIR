@@ -738,6 +738,22 @@ def sqrt(x):
     return call_intrin(x.dtype, "tir.sqrt", x)
 
 
+def power(x1,x2):
+    """Take square root of input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_intrin(x1.dtype, "tir.pow", x1,x2)
+
+
 def rsqrt(x):
     """Take reciprocal of square root of input x.
 

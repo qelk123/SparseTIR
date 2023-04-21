@@ -46,12 +46,14 @@ class UnusedArgsRemover : public StmtExprVisitor {
   }
 
   void VisitExpr_(const BufferLoadNode* op) final {
-    used_bufs.insert(op->buffer.get());
+    VisitBuffer(op->buffer);
+    // used_bufs.insert(op->buffer.get());
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    used_bufs.insert(op->buffer.get());
+    VisitBuffer(op->buffer);
+    // used_bufs.insert(op->buffer.get());
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -66,6 +68,17 @@ class UnusedArgsRemover : public StmtExprVisitor {
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitBuffer(Buffer buffer) {
+    used_bufs.insert(buffer.get());
+    auto visit_arr = [&](Array<PrimExpr> arr) {
+      for (const auto& element : arr) {
+        this->VisitExpr(element);
+      }
+    };
+
+    visit_arr(buffer->shape);
+    visit_arr(buffer->strides);
+  }
  private:
   Map<Var, Buffer> data_buf_map_;
 };

@@ -577,7 +577,7 @@ transform::Sequential MixedModulePassManager(IRModule mixed_mod, Target target) 
     mixed_pass_list.push_back(tir::transform::ThreadSync("global"));
   }
   bool disable_storage_rewrite =
-      pass_ctx->GetConfig<Bool>("tir.disable_storage_rewrite", Bool(false)).value();
+      pass_ctx->GetConfig<Bool>("tir.disable_storage_rewrite", Bool(true)).value();
 
   mixed_pass_list.push_back(tir::transform::ThreadSync("shared"));
   mixed_pass_list.push_back(tir::transform::ThreadSync("shared.dyn"));

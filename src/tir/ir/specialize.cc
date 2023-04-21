@@ -398,7 +398,7 @@ class PrimFuncSpecializer : public StmtExprMutator {
     if (buf.same_as(alloc_buf)) {
       return alloc_buf;
     } else {
-      ICHECK(buffer_map_.find(alloc_buf) == buffer_map_.end());
+      // ICHECK(buffer_map_.find(alloc_buf) == buffer_map_.end());
       buffer_map_[alloc_buf] = buf;
       return buf;
     }

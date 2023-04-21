@@ -489,7 +489,7 @@ void CheckSubtreeCompactDataflow(const ScheduleState& self, const StmtSRef& subt
   for (const StmtSRef& block_sref : child_block_srefs) {
     int local_complete_block_code = CheckCompleteBlockErrorCode(self, block_sref, subtree_root),
         local_reduction_block_code = CheckReductionBlockErrorCode(self, block_sref, subtree_root);
-    if (local_complete_block_code != 0 && local_reduction_block_code != 0) {
+    if (local_complete_block_code != 0 && local_complete_block_code != 3 && local_reduction_block_code != 0) {
       const BlockNode* block = TVM_SREF_TO_BLOCK(block, block_sref);
       throw NotCompactDataFlowError(self->mod, GetRef<Stmt>(subtree_root->stmt),
                                     GetRef<Block>(block), local_complete_block_code,

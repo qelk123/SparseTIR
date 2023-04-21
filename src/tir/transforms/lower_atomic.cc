@@ -23,6 +23,7 @@
 
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/expr_functor.h>
 #include <tvm/tir/transform.h>
 
 #include <set>
@@ -36,9 +37,30 @@ namespace tvm {
 
 namespace tir {
 
+class EliminateStoreBuffer : public ExprMutator {
+ public:
+  explicit EliminateStoreBuffer(Buffer store_buffer, Array<PrimExpr> store_indices) : store_buffer_(store_buffer), store_indices_(store_indices) {}
+  std::unordered_set<const BufferLoadNode*> load_buffer_list;
+
+ private:
+
+  PrimExpr VisitExpr_(const AddNode* op) final {
+    if (op->a.as<BufferLoadNode>()) {
+      auto buffer_load = Downcast<BufferLoad>(op->a);
+      if(buffer_load->buffer.same_as(store_buffer_)) {
+        return Add(Cast(buffer_load->dtype, Integer(0)),VisitExpr(op->b),op->span);
+      }
+    }
+    return ExprMutator::VisitExpr_(op);
+  }
+
+  Buffer store_buffer_;
+  Array<PrimExpr> store_indices_;
+};
+
 class LowerAtomicTransformer : public StmtExprMutator {
  public:
-  LowerAtomicTransformer() : is_atomic_block(false) {}
+  explicit LowerAtomicTransformer() : is_atomic_block(false) {}
 
  private:
   Stmt VisitStmt_(const BlockNode* op) final {
@@ -52,7 +74,10 @@ class LowerAtomicTransformer : public StmtExprMutator {
 
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     if (is_atomic_block) {
-      return Evaluate(atomic_add(op->buffer->data, op->indices[0], op->value));
+      auto helper = EliminateStoreBuffer(op->buffer, op->indices);
+      auto value = helper(op->value);
+      return Evaluate(atomic_add(op->buffer->data, op->indices[0],
+                                 value));  // cuda atomic add op->buffer[op->indices]+=op->value
     } else {
       return GetRef<BufferStore>(op);
     }

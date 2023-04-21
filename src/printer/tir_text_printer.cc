@@ -128,6 +128,16 @@ Doc TIRTextPrinter::PrintPrimFunc(const PrimFunc& prim_func) {
     doc << Doc::Indent(2, attr_doc);
   }
 
+  Doc axis_doc;
+  std::vector<Doc> axis_docs;
+  if(!prim_func->sp_axes.empty()) {
+    for (const auto& it : op->sp_axes) {
+      axis_docs.push_back(Doc::StrLiteral(it->name) << ": is_variable ? " << it->IsVariable() << ": is_sparse ? " << it->IsSparse() << " ");
+    }
+    axis_doc << Doc::NewLine() << "axis = {" << PrintSep(axis_docs, Doc::Indent(7, Doc::Text(",") << Doc::NewLine())) << "}";
+    doc << Doc::Indent(2, axis_doc);
+  }
+
   // print all the buffers in the tree
   if (memo_buf_.size() != 0) {
     Doc buffer_doc;
@@ -588,6 +598,9 @@ Doc TIRTextPrinter::VisitStmt_(const ForNode* op) {
       << Print(op->min + op->extent) << ")";
   if (op->kind != ForKind::kSerial) {
     doc << " " << Doc::StrLiteral(ForKind2String(op->kind));
+    if(op->kind == ForKind::kThreadBinding){
+      doc << op->thread_binding.value()->thread_tag;
+    }
   }
   doc << PrintBody(op->body);
   return doc;
@@ -611,7 +624,7 @@ Doc TIRTextPrinter::VisitStmt_(const SparseIterationNode* op) {
   doc << "sparse_iteration " << op->name << "(";
   doc << Print(op->sp_iter_vars[0]->var);
   for (int i = 1; i < static_cast<int>(op->sp_iter_vars.size()); ++i) {
-    doc << "," << Print(op->sp_iter_vars[i]->var);
+    doc << "," << Print(op->sp_iter_vars[i]->var) << "(" << Print(op->sp_iter_vars[i]->axis->name) <<")";
   }
   doc << ")";
   Doc body;
@@ -710,6 +723,7 @@ Doc TIRTextPrinter::VisitStmt_(const BlockRealizeNode* op) {
   }
   body << Print(block_op->body);
   doc << Doc::Indent(2, block_attr_doc << body);
+  doc << Doc::NewLine() << "}";
   return doc;
 }
 

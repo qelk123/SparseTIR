@@ -1,0 +1,2 @@
+#!/bin/bash
+/home/linuxbrew/.linuxbrew/bin/cmake --no-warn-unused-cli -DUSE_CUDA=ON -DUSE_LLVM=/usr/lib/llvm-6.0/bin/llvm-config -DUSE_RELAY_DEBUG=ON -DUSE_BLAS=openblas -DCMAKE_CXX_STANDARD:STRING=17 -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE -DCMAKE_BUILD_TYPE:STRING=Debug -DCMAKE_C_COMPILER:FILEPATH=/home/linuxbrew/.linuxbrew/bin/clang -DCMAKE_CXX_COMPILER:FILEPATH=/home/linuxbrew/.linuxbrew/bin/clang++ -S/home/liuyn/code/new_sp_tvm -B/home/liuyn/code/new_sp_tvm/build -G Ninja

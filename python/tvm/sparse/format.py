@@ -114,6 +114,86 @@ def column_part_hyb(num_rows, num_cols, indptr_nd, indices_nd, num_col_parts, bu
     return _ffi_api.ColumnPartHyb(
         num_rows, num_cols, indptr_nd, indices_nd, num_col_parts, buckets  # type: ignore
     )
+    
+def column_ell_reshape_index(nv, ne, col_size, indptr, indices):
+    """Partition input CSR matrix by columns and collect rows into buckets according to non zero elements per row.
+
+    Parameters
+    ----------
+    nv : int
+        Number of vertex.
+    ne : int
+        Number of edge.
+    col_size : int
+        Number of columns ellpack.
+    indptr : NDArray
+        The indptr array of CSR matrix.
+    indices : NDArray
+        The indices array of CSR matrix.
+
+    Returns
+    -------
+    Tuple[List[NDArray]]
+        The pair of (ell_row_indices, ell_col_indices, ell_row_padding_num).
+    """
+    return _ffi_api.ColumnELLReshapeIndex(
+        nv, ne, col_size, indptr, indices  # type: ignore
+    )
+    
+def column_ell_data_padding(row_num, nnz_col, dim_k, indptr, or_buffer):
+    """Partition input CSR matrix by columns and collect rows into buckets according to non zero elements per row.
+
+    Parameters
+    ----------
+    nv : int
+        Number of vertex.
+    ne : int
+        Number of edge.
+    col_size : int
+        Number of columns ellpack.
+    indptr : NDArray
+        The indptr array of CSR matrix.
+    indices : NDArray
+        The indices array of CSR matrix.
+
+    Returns
+    -------
+    Tuple[List[NDArray]]
+        The pair of (ell_row_indices, ell_col_indices, ell_row_padding_num).
+    """
+    return _ffi_api.ColumnEllDataPadding(
+        row_num, nnz_col, dim_k, indptr, or_buffer  # type: ignore
+    )
+    
+    
+def column_part_hyb2(num_rows, num_cols, indptr_nd, indices_nd, num_col_parts, buckets):
+    """Partition input CSR matrix by columns and collect rows into buckets according to non zero elements per row.
+
+    Parameters
+    ----------
+    num_rows : int
+        Number of rows in the CSR matrix.
+    num_cols : int
+        Number of columns in the CSR matrix.
+    indptr : NDArray
+        The indptr array of CSR matrix.
+    indices : NDArray
+        The indices array of CSR matrix.
+    num_col_parts : int
+        Number of column partitions.
+    buckets : List
+        The bucket sizes array.
+
+    Returns
+    -------
+    Tuple[List[List[NDArray]]]
+        The pair of (row_indices, col_indices, mask).
+        row_indices is stored as a list of lists with shape (num_col_parts, len(buckets)), where the innermost element is an NDArray.
+        col_indices and mask are stored in the same way.
+    """
+    return _ffi_api.ColumnPartHyb2(
+        num_rows, num_cols, indptr_nd, indices_nd, num_col_parts, buckets  # type: ignore
+    )
 
 
 def condense(indptr_nd, indices_nd, t, g):

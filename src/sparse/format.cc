@@ -115,7 +115,7 @@ Array<Array<Array<NDArray>>> ColumnPartHyb(int num_rows, int num_cols, NDArray i
         row_indices[part_id][bucket_id].push_back(row_id);
       }
       col_indices[part_id][bucket_id].push_back(col_id);
-      mask[part_id][bucket_id].push_back(1);
+      mask[part_id][bucket_id].push_back(1);//for float test
     }
   }
 
@@ -166,6 +166,302 @@ Array<Array<Array<NDArray>>> ColumnPartHyb(int num_rows, int num_cols, NDArray i
 
   return {row_indices_nd, col_indices_nd, mask_nd};
 }
+
+
+
+
+Array<Array<NDArray>> ColumnPartHyb2(int num_rows, int num_cols, NDArray indptr,
+                                           NDArray indices, int num_col_parts,
+                                           Array<Integer> buckets) {
+  int partition_size = (num_cols + num_col_parts - 1) / num_col_parts;
+  int num_bkts = buckets.size();
+  std::vector<int> buckets_vec;
+  for (const Integer& bucket_size : buckets) {
+    buckets_vec.push_back(bucket_size->value);
+  }
+
+  CHECK_EQ(indptr->dtype.bits, 32) << "Only support int32 index data type, got "
+                                   << int(indptr->dtype.bits) << " bits for indptr.";
+  CHECK_EQ(indices->dtype.bits, 32) << "Only support int32 index data type, got "
+                                    << int(indices->dtype.bits) << " bits for indices.";
+  CHECK_EQ(indptr->device.device_type, kDLCPU) << "Only support ColumnPartHyb conversion on CPU.";
+  CHECK_EQ(indices->device.device_type, kDLCPU) << "Only support ColumnPartHyb conversion on CPU.";
+  int* indptr_data = static_cast<int*>(indptr->data);
+  int* indices_data = static_cast<int*>(indices->data);
+  std::vector<std::unordered_multiset<int>> degree_counter(num_col_parts);
+  for (int i = 0; i < num_rows; ++i) {
+    for (int j = indptr_data[i]; j < indptr_data[i + 1]; ++j) {
+      int row_id = i;
+      int col_id = indices_data[j];
+      int part_id = col_id / partition_size;
+      degree_counter[part_id].insert(row_id);//part id对应的col part在row id对应的row上有非零值,row_id重复的次数就是该row在col part区间上的nnz
+    }
+  }
+
+  /* (num_parts, num_buckets, ...) */
+  std::vector<std::vector<std::vector<int>>> row_indices(num_col_parts);
+  std::vector<std::vector<std::vector<int>>> col_indices(num_col_parts);
+  std::vector<std::vector<std::vector<int>>> mask(num_col_parts);
+  // init row_indices, col_indices, mask
+  for (int part_id = 0; part_id < num_col_parts; ++part_id) {
+    for (int bucket_id = 0; bucket_id < num_bkts; ++bucket_id) {
+      row_indices[part_id].push_back(std::vector<int>());
+      col_indices[part_id].push_back(std::vector<int>());
+      mask[part_id].push_back(std::vector<int>());
+    }
+  }
+  for (int i = 0; i < num_rows; ++i) {
+    for (int j = indptr_data[i]; j < indptr_data[i + 1]; ++j) {
+      int row_id = i;
+      int col_id = indices_data[j];
+      int part_id = col_id / partition_size;
+      int degree = degree_counter[part_id].count(row_id);
+      int bucket_id = std::upper_bound(buckets_vec.begin(), buckets_vec.end(), degree - 1) -
+                      buckets_vec.begin();
+      if (bucket_id == num_bkts) {
+        bucket_id--;
+      }
+      int bucket_size = buckets_vec[bucket_id];
+      bool create_new_bucket = false;
+      int remainder = col_indices[part_id][bucket_id].size() % bucket_size;
+      if (remainder != 0) {
+        ICHECK(!row_indices[part_id][bucket_id].empty()) << "row indices should not be empty.";
+        if (row_id != row_indices[part_id][bucket_id].back()) {
+          // padding
+          for (int k = remainder; k < bucket_size; ++k) {
+            col_indices[part_id][bucket_id].push_back(0);
+            mask[part_id][bucket_id].push_back(0);
+          }
+          create_new_bucket = true;
+        }
+      } else {
+        create_new_bucket = true;
+      }
+      if (create_new_bucket) {
+        ICHECK(col_indices[part_id][bucket_id].size() % bucket_size == 0) << "Invalid padding";
+        row_indices[part_id][bucket_id].push_back(row_id);
+      }
+      col_indices[part_id][bucket_id].push_back(col_id);
+      mask[part_id][bucket_id].push_back(1);
+    }
+  }
+
+  // final padding and conversion to NDArray
+  Array<NDArray> tile_pos_nd;
+  Array<NDArray> tile_indices_nd;
+  Array<NDArray> row_pos_nd;
+  Array<NDArray> row_indices_nd;
+  Array<NDArray> col_indices_nd;
+  Array<NDArray> mask_nd;
+  Array<NDArray> nnz_row;
+
+  std::vector<std::vector<int>> tile_pos(num_bkts);
+  std::vector<std::vector<int>> tile_indices(num_bkts);
+  std::vector<std::vector<int>> row_pos(num_bkts);
+  std::vector<std::vector<int>> row_indices_r(num_bkts);
+  std::vector<std::vector<int>> col_indices_r(num_bkts);
+  std::vector<std::vector<int>> mask_r(num_bkts);
+  std::vector<std::vector<int>> nnz_r(num_bkts);
+
+  for (int bucket_id = 0; bucket_id < num_bkts; ++bucket_id) {
+    tile_pos[bucket_id].resize(2);
+    tile_pos[bucket_id][0]=0;
+    tile_pos[bucket_id][1]=num_col_parts;
+    tile_indices[bucket_id].resize(num_col_parts);
+    row_pos[bucket_id].resize(num_col_parts+1);
+    int row_nnz_cur = 0;
+    for (int part_id = 0; part_id < num_col_parts; ++part_id) {
+      row_pos[bucket_id][part_id] = row_nnz_cur;
+      tile_indices[bucket_id][part_id]=part_id;
+      int bucket_size = buckets_vec[bucket_id];
+      // padding
+      int remainder = col_indices[part_id][bucket_id].size() % bucket_size;
+      if (remainder != 0) {
+        for (int k = remainder; k < bucket_size; ++k) {
+          col_indices[part_id][bucket_id].push_back(0);
+          mask[part_id][bucket_id].push_back(0);
+        }
+      }
+      row_nnz_cur+=row_indices[part_id][bucket_id].size();
+      // int diffe_num_val=-1;
+      // int diffe_num=0;
+      // int count = true;
+      for(auto i:row_indices[part_id][bucket_id]) {
+        // if(bucket_id==num_bkts-1) std::cout<<"row_indices:"<<i<<"\n";
+        // if(bucket_id==num_bkts-1 )  {
+        //   if(i==diffe_num_val)
+        //   {
+        //     if(count)
+        //     {
+        //       diffe_num++;
+        //       count =false;
+        //     }
+        //   }
+        //   else{
+        //     diffe_num_val = i;
+        //     count = true;
+        //   }
+        //   std::cout<<"diff_num:"<<diffe_num<<"\n";
+        // }
+        row_indices_r[bucket_id].push_back(i);
+      }
+    }
+    nnz_r[bucket_id].push_back(row_nnz_cur);
+    col_indices_r[bucket_id].resize(row_nnz_cur*buckets_vec[bucket_id]);
+    mask_r[bucket_id].resize(row_nnz_cur*buckets_vec[bucket_id]);
+    int index_col_indices_r = 0;
+    for(int part_id = 0; part_id < num_col_parts; ++part_id) {
+      for(size_t j =0 ;j<col_indices[part_id][bucket_id].size();j++) {
+        col_indices_r[bucket_id][index_col_indices_r] = col_indices[part_id][bucket_id][j];
+        mask_r[bucket_id][index_col_indices_r] = mask[part_id][bucket_id][j];
+        index_col_indices_r++;
+      }
+    }
+    CHECK(index_col_indices_r==row_nnz_cur*buckets_vec[bucket_id])<<"nnz_number should equal to nnz_row_number*bucketsize";
+    row_pos[bucket_id][num_col_parts] = row_nnz_cur;
+  }
+
+  for (int bucket_id = 0; bucket_id < num_bkts; ++bucket_id) {
+
+    NDArray tile_pos_bucket_local = NDArray::Empty({2}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray tile_indices_bucket_local = NDArray::Empty({num_col_parts}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray row_pos_bucket_local = NDArray::Empty({num_col_parts+1}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray row_indices_r_bucket_local = NDArray::Empty({(int)(row_indices_r[bucket_id].size())}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray col_indices_r_bucket_local = NDArray::Empty({(int)(col_indices_r[bucket_id].size())}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray mask_r_bucket_local = NDArray::Empty({(int)(mask_r[bucket_id].size())}, {kDLInt, 32, 1}, {kDLCPU, 0});
+    NDArray nnz_row_bucket_local = NDArray::Empty({(int)(nnz_r[bucket_id].size())}, {kDLInt, 32, 1}, {kDLCPU, 0});
+
+    tile_pos_bucket_local.CopyFromBytes(tile_pos[bucket_id].data(),2 * sizeof(int));
+    tile_indices_bucket_local.CopyFromBytes(tile_indices[bucket_id].data(),num_col_parts * sizeof(int));
+    row_pos_bucket_local.CopyFromBytes(row_pos[bucket_id].data(),(num_col_parts+1) * sizeof(int));
+    row_indices_r_bucket_local.CopyFromBytes(row_indices_r[bucket_id].data(),(row_indices_r[bucket_id].size()) * sizeof(int));
+    col_indices_r_bucket_local.CopyFromBytes(col_indices_r[bucket_id].data(),(col_indices_r[bucket_id].size()) * sizeof(int));
+    mask_r_bucket_local.CopyFromBytes(mask_r[bucket_id].data(),(mask_r[bucket_id].size()) * sizeof(int));
+    nnz_row_bucket_local.CopyFromBytes(nnz_r[bucket_id].data(),(nnz_r[bucket_id].size()) * sizeof(int));
+
+
+    tile_pos_nd.push_back(tile_pos_bucket_local);
+    tile_indices_nd.push_back(tile_indices_bucket_local);
+    row_pos_nd.push_back(row_pos_bucket_local);
+    row_indices_nd.push_back(row_indices_r_bucket_local);
+    col_indices_nd.push_back(col_indices_r_bucket_local);
+    mask_nd.push_back(mask_r_bucket_local);
+    nnz_row.push_back(nnz_row_bucket_local);
+  }
+  return {tile_pos_nd, tile_indices_nd, row_pos_nd, row_indices_nd, col_indices_nd, mask_nd, nnz_row};
+}
+
+
+Array<NDArray> ColumnELLReshapeIndex(int nv, int ne, int col_size, NDArray indptr,
+                                           NDArray indices) {
+  CHECK_EQ(indptr->dtype.bits, 32)
+      << "Only support int32 index data type, got " << int(indptr->dtype.bits)
+      << " bits for csf_indptr_0.";
+  CHECK_EQ(indices->dtype.bits, 32)
+      << "Only support int32 index data type, got " << int(indices->dtype.bits)
+      << " bits for csf_indices_0.";
+  CHECK_EQ(indptr->device.device_type, kDLCPU)
+      << "Only support ColumnELLReshapeIndex conversion on CPU.";
+  CHECK_EQ(indices->device.device_type, kDLCPU)
+      << "Only support ColumnELLReshapeIndex conversion on CPU.";
+  int * indptr_data = static_cast<int*>(indptr->data);
+  int * indices_data = static_cast<int*>(indices->data);
+  std::vector<int> ell_row_indices;
+  std::vector<int> ell_col_indices;
+  std::vector<int> ell_row_padding_num;
+  int row_sum = 0;
+  for (int row_index = 0; row_index < nv; row_index++) {
+    int original_col_num = indptr_data[row_index+1] - indptr_data[row_index];
+    int rows_for_original_row = (original_col_num + col_size - 1) / col_size;
+    int src_start_index = indptr_data[row_index];
+    row_sum += rows_for_original_row;
+    ell_row_indices.resize(row_sum,row_index);
+    ell_col_indices.resize(row_sum*col_size,0);
+    int dst_start_index = (row_sum - rows_for_original_row) * col_size;
+    ell_row_padding_num.push_back(rows_for_original_row * col_size - original_col_num);
+    for (int i = 0; i < original_col_num; i++) {
+      //TODO: use memcpy
+      ell_col_indices[dst_start_index+i] = indices_data[src_start_index+i];
+    }
+  }
+  //TODO: maybe transpose
+  NDArray ell_col_indices_nd =
+      NDArray::Empty({row_sum,col_size}, {kDLInt, 32, 1}, {kDLCPU, 0});
+  ell_col_indices_nd.CopyFromBytes(ell_col_indices.data(),
+                                    row_sum * col_size * sizeof(int));
+  NDArray ell_row_indices_nd =
+      NDArray::Empty({row_sum}, {kDLInt, 32, 1}, {kDLCPU, 0});
+  ell_row_indices_nd.CopyFromBytes(
+      ell_row_indices.data(), row_sum * sizeof(int));
+
+  NDArray ell_row_padding_num_nd =
+      NDArray::Empty({nv}, {kDLInt, 32, 1}, {kDLCPU, 0});
+  ell_row_padding_num_nd.CopyFromBytes(
+      ell_row_padding_num.data(), nv * sizeof(int));
+
+  return {ell_row_indices_nd,ell_col_indices_nd,ell_row_padding_num_nd};
+}
+
+Array<NDArray> ColumnEllDataPadding(int row_num,int nnz_col, Array<Integer> dim_k, NDArray indptr,
+                                           Array<NDArray> or_buffer) {
+  CHECK_EQ(indptr->dtype.bits, 32)
+      << "Only support int32 index data type, got " << int(indptr->dtype.bits)
+      << " bits for indptr.";
+  CHECK_EQ(indptr->device.device_type, kDLCPU)
+      << "Only support or_buffer padding conversion on CPU.";
+  for (auto i: or_buffer) {
+    CHECK_EQ(i->dtype.bits, 64)
+        << "Only support double data type, got " << int(i->dtype.bits)
+        << " bits for or_buffer.";
+    CHECK_EQ(i->device.device_type, kDLCPU)
+        << "Only support or_buffer padding on CPU.";
+  }
+  if(nnz_col == 1) {
+    return or_buffer;
+  }
+  int * indptr_data = static_cast<int*>(indptr->data);
+  int buffer_size = dim_k.size();
+  double * value_data[buffer_size];
+  double * padded_value_data[buffer_size];
+  // std::vector<std::vector<double>> padded_buffer;
+  std::vector<void *> padded_buffer_calloc;
+  for (int i = 0; i < buffer_size; i++) {
+    value_data[i] = static_cast<double*>(or_buffer[i]->data);
+    // std::vector<double> item;
+    // item.resize(row_num*nnz_col*dim_k[i],0);
+    void * item_calloc = calloc(row_num*nnz_col*dim_k[i],sizeof(double));
+    // padded_buffer.push_back(item);
+    padded_buffer_calloc.push_back(item_calloc);
+    // padded_value_data[i] = static_cast<double*>(padded_buffer.back().data());
+    padded_value_data[i] = static_cast<double*>(item_calloc);
+  }
+
+  int row_num_after_padding = 0;
+  for (int index = 0; index < indptr->shape[0]-1; index++) {
+    for (int i = 0; i < buffer_size; i++) {
+      std::memcpy((void*)(padded_value_data[i]+row_num_after_padding*nnz_col*dim_k[i]),
+        (void*)(value_data[i]+indptr_data[index]*dim_k[i]),(indptr_data[index+1]-indptr_data[index])
+        *dim_k[i]*sizeof(double));
+    }
+    row_num_after_padding += (indptr_data[index+1]-indptr_data[index]+nnz_col-1)/nnz_col;
+    CHECK_LE(row_num_after_padding , row_num);
+  }
+
+  Array<NDArray> padded_buffer_nd_list;
+
+  for (int i = 0; i < buffer_size; i++) {
+    NDArray padded_buffer_nd = NDArray::Empty({row_num*nnz_col,dim_k[i]}, {kDLFloat, 64, 1}, {kDLCPU, 0});
+    // padded_buffer_nd.CopyFromBytes(padded_buffer[i].data(),
+    //                                         row_num*nnz_col*dim_k[i] * sizeof(double));
+    padded_buffer_nd.CopyFromBytes(padded_buffer_calloc[i],
+                                            row_num*nnz_col*dim_k[i] * sizeof(double));
+    padded_buffer_nd_list.push_back(padded_buffer_nd);
+  }
+
+  return padded_buffer_nd_list;
+}
+
+
 
 /*!
  * \brief 3-Dimensional CSF to composable ELL format.
@@ -379,7 +675,7 @@ Array<NDArray> ConDense(NDArray indptr, NDArray indices, int t, int g) {
       for (int j = indptr_data[i]; j < indptr_data[i + 1]; ++j) {
         int row = i;
         int col = indices_data[j];
-        col_row_map.insert({col, row});
+        col_row_map.insert({col, row});//处于某一个tile区间内的index值（包括了col值和row值）
       }
     }
 
@@ -387,10 +683,10 @@ Array<NDArray> ConDense(NDArray indptr, NDArray indices, int t, int g) {
     for (auto unique_col_itr = col_row_map.begin(); unique_col_itr != col_row_map.end();) {
       int col = unique_col_itr->first;
       auto eq_range = col_row_map.equal_range(unique_col_itr->first);
-      int nnz_inside_tile = 0;
-      for (auto equal_iter = eq_range.first; equal_iter != eq_range.second; ++equal_iter) {
-        nnz_inside_tile++;
-      }
+      // int nnz_inside_tile = 0;
+      // for (auto equal_iter = eq_range.first; equal_iter != eq_range.second; ++equal_iter) {
+      //   nnz_inside_tile++;
+      // }
       // add tile to blockized format.
       tile_counter++;
       // new group
@@ -430,7 +726,10 @@ Array<NDArray> ConDense(NDArray indptr, NDArray indices, int t, int g) {
 
 namespace sparse {
 TVM_REGISTER_GLOBAL("tir.sparse.ColumnPartHyb").set_body_typed(ColumnPartHyb);
+TVM_REGISTER_GLOBAL("tir.sparse.ColumnPartHyb2").set_body_typed(ColumnPartHyb2);
+TVM_REGISTER_GLOBAL("tir.sparse.ColumnELLReshapeIndex").set_body_typed(ColumnELLReshapeIndex);
 TVM_REGISTER_GLOBAL("tir.sparse.ConDense").set_body_typed(ConDense);
 TVM_REGISTER_GLOBAL("tir.sparse.CSFToELL3D").set_body_typed(CSFToELL3D);
+TVM_REGISTER_GLOBAL("tir.sparse.ColumnEllDataPadding").set_body_typed(ColumnEllDataPadding);
 }  // namespace sparse
 }  // namespace tvm

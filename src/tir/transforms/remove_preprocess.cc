@@ -114,6 +114,18 @@ PrimFunc RemovePreprocess(PrimFunc f) {
           << "Internal error, extra_buffer_map do not have key " << var;
       fptr->buffer_map.Set(var, remover.extra_buffer_map.Get(var).value());
     }
+    std::unordered_set<String> alloc_buffer_name;
+    for (auto map_item : fptr->buffer_map) {
+      if (map_item.first->name_hint == map_item.second->data->name_hint) {
+        // fptr->buffer_map.erase(map_item.first);
+        alloc_buffer_name.insert(map_item.first->name_hint);
+      }
+    }
+    for (auto map_item : fptr->buffer_map){
+      if (alloc_buffer_name.count(map_item.first->name_hint)) {
+        fptr->buffer_map.erase(map_item.first);
+      }
+    }
     return f;
   } else {
     return f;

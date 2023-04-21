@@ -1236,6 +1236,7 @@ class AllocSparseBuffer(SpecialStmt):
             dtype: str = "float32",
             scope: str = "global",
             default_value: Optional[PrimExpr] = None,
+            add_in_buffer_table: bool = False,
             span: Optional[Span] = None,
         ):
             if not isinstance(self.node, ast.Assign) or not len(self.node.lhs) == 1:
@@ -1249,6 +1250,8 @@ class AllocSparseBuffer(SpecialStmt):
             buffer = tvm.tir.sparse.SparseBuffer(
                 data, axes, dtype, buffer_name, 0, default_value, span
             )
+            if add_in_buffer_table:
+                self.context.func_buffer_map[data] = buffer
             if self.context.current_block_scope():
                 self.context.current_block_scope().alloc_buffers.append(buffer)
             else:

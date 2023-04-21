@@ -41,7 +41,7 @@ String GetVarNameFromAxis(const Axis& axis) {
   return ret;
 }
 
-PrimFunc AddSuffix(PrimFunc func, String suffix) {
+PrimFunc AddSuffix(PrimFunc func, String suffix) {//这个function的所有var axis都增加了一个后缀
   auto* fptr = func.CopyOnWrite();
   // update params
   Map<Var, PrimExpr> var_map;
@@ -95,7 +95,7 @@ PrimFunc AddSuffix(PrimFunc func, String suffix) {
   return func;
 }
 
-Array<Var> UpdateParams(const Array<PrimFunc>& format_descs, const Array<Var>& orig_params) {
+Array<Var> UpdateParams(const Array<PrimFunc>& format_descs, const Array<Var>& orig_params) {//将format_descs中的var信息加入到原来的function中
   Array<Var> ret;
   for (const Var& param : orig_params) {
     ret.push_back(param);
@@ -171,7 +171,7 @@ class IndexRewriter {
         before_indices.push_back(Integer(0));
       }
     }
-    Array<PrimExpr> after_indices = idx_map_->MapIndices(before_indices);
+    Array<PrimExpr> after_indices = idx_map_->MapIndices(before_indices);//从输入的index var list拿到输出的index var list
     for (size_t i = 0; i < axes_after_rewrite_.size(); ++i) {
       axis_val_map->Set(axes_after_rewrite_[i], after_indices[i]);
     }
@@ -189,12 +189,12 @@ class SparseFormatDecomposer : public StmtExprMutator {
   explicit SparseFormatDecomposer(const FormatRewriteRule& rule, const PrimFunc& new_func,
                                   Array<Axis> old_axes, Array<SparseBuffer> old_buffers) {
     rewrite_suffix = "_" + rule->name;
-    Array<Axis> old_axes_to_rewrite;
+    // Array<Axis> old_axes_to_rewrite;
     for (const Axis& axis : old_axes) {
       name_axis_map_.Set(axis->name, axis);
-      if (name_axis_map_.count(axis->name)) {
-        old_axes_to_rewrite.push_back(axis);
-      }
+      // if (name_axis_map_.count(axis->name)) {
+      //   old_axes_to_rewrite.push_back(axis);
+      // }
     }
     for (const Axis& axis : new_func->sp_axes) {
       name_axis_map_.Set(axis->name, axis);
@@ -203,6 +203,7 @@ class SparseFormatDecomposer : public StmtExprMutator {
       axes_before_rewrite_.push_back(name_axis_map_.Get(name).value());
     }
     for (const String& name : rule->axes_after_rewrite) {
+      std::cout<<name + "_" + rule->name<<": "<<PrettyPrint(name_axis_map_.Get(name + "_" + rule->name).value())<<"\n";
       axes_after_rewrite_.push_back(name_axis_map_.Get(name + "_" + rule->name).value());
     }
     for (const auto& kv : rule->axis_map) {
@@ -211,7 +212,7 @@ class SparseFormatDecomposer : public StmtExprMutator {
       for (const String& name : kv.second) {
         v.push_back(name_axis_map_.Get(name + "_" + rule->name).value());
       }
-      axis_rewrite_map_.Set(k, v);
+      axis_rewrite_map_.Set(k, v);//axis重写的规则
     }
     for (const SparseBuffer& buf : old_buffers) {
       name_buf_map_.Set(buf->name, buf);
@@ -219,19 +220,25 @@ class SparseFormatDecomposer : public StmtExprMutator {
     Array<Buffer> new_buffers;
     for (const Var& param : new_func->params) {
       if (new_func->buffer_map.count(param)) {
-        new_buffers.push_back(new_func->buffer_map.Get(param).value());
+        new_buffers.push_back(new_func->buffer_map.Get(param).value());//new buffer来自于func_desc
       }
     }
-    CHECK(new_buffers.size() == rule->buffers_to_rewrite.size())
+    for (auto map_item : new_func->buffer_map) {
+      if(support::StartsWith(map_item.second->data->name_hint, map_item.first->name_hint.c_str())) {
+        new_buffers.push_back(map_item.second);
+      }
+    }
+    CHECK(new_buffers.size() == rule->buffers_to_rewrite.size())//定义rewrite func的时候，其中只能出现需要重写的func
         << "The number of buffers to rewrite does match in provided format description function "
            "and buffers_to_rewrite list.";
+    
     for (size_t i = 0; i < rule->buffers_to_rewrite.size(); ++i) {
       String name = rule->buffers_to_rewrite[i];
       buffer_rewrite_map_.Set(name_buf_map_.Get(name).value(),
                               Downcast<SparseBuffer>(new_buffers[i]));
     }
     rewriter_.Init(axes_before_rewrite_, axes_after_rewrite_, rule->idx_map, rule->inv_idx_map);
-    GenerateFormatRewriteBlock();
+    GenerateFormatRewriteBlock();//利用rewriter完成映射
   }
 
   String rewrite_suffix;
@@ -250,13 +257,13 @@ class SparseFormatDecomposer : public StmtExprMutator {
       for (const Axis& axis : after_rewrite->axes) {
         Var var(GetVarNameFromAxis(axis), axis->idtype);
         after_indices.push_back(var);
-        sp_iter_vars.push_back(SpIterVar(var, false, axis));
+        sp_iter_vars.push_back(SpIterVar(var, false, axis));//这个SparseIteration是在新的sparse buffer 的axis上迭代的
         axis_val_map.Set(axis, var);
       }
       rewriter_.UpdateInvMap(&axis_val_map);
       Array<PrimExpr> before_indices;
       for (const Axis& axis : before_rewrite->axes) {
-        before_indices.push_back(axis_val_map.Get(axis).value());
+        before_indices.push_back(axis_val_map.Get(axis).value());//两个buffer对于相同axis的var是相同的
       }
       format_rewrites_blks.push_back(SparseIteration(
           sp_iter_vars, "rewrite_" + after_rewrite->name,
@@ -265,7 +272,7 @@ class SparseFormatDecomposer : public StmtExprMutator {
     }
   }
 
-  Stmt VisitStmt_(const BlockNode* op) final {
+  Stmt VisitStmt_(const BlockNode* op) final {//只能有一个block，其余都应该是sparse iter
     CHECK(op->name_hint == "root")
         << "Cannot perform sparse format rewrite on a TVMScript with block other than root.";
     Stmt body = op->body;
@@ -346,7 +353,7 @@ class SparseFormatDecomposer : public StmtExprMutator {
     rewriter_.UpdateMap(&axis_val_map);
     rewriter_.UpdateInvMap(&axis_val_map);
     for (const Axis& axis : new_buf->axes) {
-      new_indices.push_back(ana.Simplify(axis_val_map.Get(axis).value()));
+      new_indices.push_back(ana.Simplify(axis_val_map.Get(axis).value()));//var -> axis->new_axis->new var
     }
     return new_indices;
   }
@@ -354,9 +361,11 @@ class SparseFormatDecomposer : public StmtExprMutator {
   bool CheckBypass(const SparseBuffer& buf, const Array<PrimExpr>& indices) {
     for (size_t i = 0; i < indices.size(); ++i) {
       if (!axis_iter_var_map_.Get(buf->axes[i]).value()->var.same_as(indices[i])) {
+        std::cout<<"cannot bypass!\n";
         return false;
       }
     }
+    std::cout<<"bypass!\n";
     return true;
   }
 
@@ -446,7 +455,7 @@ PrimFunc SparseFormatDecompose(Array<FormatRewriteRule> composable_formats, Prim
     for (const FormatRewriteRule& rule : composable_formats) {
       format_descs.push_back(AddSuffix(rule->new_format_desc, "_" + rule->name));
     }
-    fptr->params = UpdateParams(format_descs, f->params);
+    fptr->params = UpdateParams(format_descs, f->params);//把format_descs中的各种参数添加到function的相应结构当中
     fptr->buffer_map = UpdateBufferMap(format_descs, f->buffer_map);
     fptr->sp_axes = UpdateSparseAxes(format_descs, f->sp_axes);
     Array<Stmt> format_rewrite_blks, compute_blks;

@@ -204,6 +204,31 @@ class LowerSparseIterContext {
     Update(&top()->write_buffers, &top()->write_regions_, buffer, region);
   }
 
+  void GetAllocedBuffer() {
+    top()->allocted_buffers.clear();
+    for (auto read: top()->read_buffers_) {
+      for (auto write: top()->write_buffers) {
+        if (read.same_as(write)) {
+          top()->allocted_buffers.push_back(read->data);
+        }
+      }
+    }
+  }
+
+  void DeleteAllocBufferRead() {
+    std::cout<<"DeleteAllocBufferRead\n";
+    for (auto var: top()->allocted_buffers) {
+      std::cout<<"allocted_buffers:"<<PrettyPrint(var)<<"\n";
+      Delete(&top()->read_buffers_, &top()->read_regions_, var);
+    }
+  }
+
+  void DeleteAllocBufferWrite() {
+    for (auto var: top()->allocted_buffers) {
+      Delete(&top()->write_buffers, &top()->write_regions_, var);
+    }
+  }
+
   /*! \brief Return the collected read regions. */
   Array<BufferRegion> CollectReadRegions() {
     return std::move(CollectRegions(top()->read_buffers_, top()->read_regions_));
@@ -270,6 +295,8 @@ class LowerSparseIterContext {
     std::vector<Buffer> read_buffers_;
     /*! \brief The buffers that the current block writes */
     std::vector<Buffer> write_buffers;
+    /*! \brief The buffers that allocated in the current block */
+    std::vector<Var> allocted_buffers;
     /*! \brief The opaque buffer which is access by buffer.data */
     std::vector<std::vector<tvm::arith::IntSet>> read_regions_;
     /*! \brief The write regions of the current block */
@@ -299,6 +326,19 @@ class LowerSparseIterContext {
     }
     buffers->push_back(std::move(buffer));
     regions->push_back(std::move(region));
+  }
+
+  void Delete(std::vector<Buffer>* buffers, std::vector<std::vector<arith::IntSet>>* regions,
+              Var buffer_var) {
+    ICHECK_EQ(buffers->size(), regions->size())
+        << " Expected the buffer and regions to have the same size ";
+    for (size_t i = 0; i < regions->size(); ++i) {
+      if ((*buffers)[i]->data.same_as(buffer_var)) {
+        buffers->erase(buffers->begin()+i);
+        regions->erase(regions->begin()+i);
+        return;
+      }
+    }
   }
 
   /*! \brief Return the array of BufferRegion's given buffer array and region array. */
@@ -749,6 +789,9 @@ class IterTransformer : public StmtExprMutator {
             ctx_.GetDomMap()));
       }
       ctx_.UpdateWrite(write_access->buffer, relaxed_region);
+      // ctx_.GetAllocedBuffer();
+      // ctx_.DeleteAllocBufferRead();
+      // ctx_.DeleteAllocBufferWrite();
     }
     return GetRef<BlockRealize>(op);
   }
@@ -887,7 +930,7 @@ class IterTransformer : public StmtExprMutator {
       return bsearch_map_[args];
     }
     DataType dtype = buf->dtype;
-    Buffer low = MakeScratchpad("low", dtype);
+    Buffer low = MakeScratchpad("cur", dtype);
     Buffer high = MakeScratchpad("high", dtype);
 
     VarCollector collector;
@@ -938,33 +981,59 @@ class IterTransformer : public StmtExprMutator {
 
     Stmt low_store = BufferStore(low, lb, {Integer(0)});
     Stmt high_store = BufferStore(high, ub, {Integer(0)});
-    PrimExpr low_val = BufferLoad(low, {Integer(0)}), high_val = BufferLoad(high, {Integer(0)}),
-             mid_val = BufferLoad(mid, mid_indices);
-    PrimExpr while_cond = low_val < high_val;
-    // Two store mid statements, one for init, another one inside while loop.
-    Stmt mid_store_init = BufferStore(mid, low_val + floordiv(high_val - low_val, 2), mid_indices);
-    Stmt mid_store_while = BufferStore(mid, low_val + floordiv(high_val - low_val, 2), mid_indices);
+    SeqStmt init_seq({low_store,high_store});
+    PrimExpr low_val = BufferLoad(low, {Integer(0)}), high_val = BufferLoad(high, {Integer(0)});
+    auto mid_val = BufferLoad(mid, mid_indices);
+    // PrimExpr while_cond = low_val < high_val;
+    // // Two store mid statements, one for init, another one inside while loop.
+    // Stmt mid_store_init = BufferStore(mid, low_val + floordiv(high_val - low_val, 2), mid_indices);
+    // Stmt mid_store_while = BufferStore(mid, low_val + floordiv(high_val - low_val, 2), mid_indices);
+    // Array<PrimExpr> indices = prefix_indices;
+    // indices.push_back(mid_val);
+    // PrimExpr pivot = BufferLoad(buf, indices);
+    // PrimExpr pivot_cmp_cond = left ? (pivot < val) : (pivot > val);
+    // Stmt if_true = left ? BufferStore(low, mid_val + 1, {Integer(0)})
+    //                     : BufferStore(high, mid_val, {Integer(0)});
+    // Stmt if_false = left ? BufferStore(high, mid_val, {Integer(0)})
+    //                      : BufferStore(low, mid_val + 1, {Integer(0)});
+    // Stmt if_then_else = IfThenElse(pivot_cmp_cond, if_true, if_false);
+    // SeqStmt while_body({if_then_else, mid_store_while});
+    // Stmt while_ = While(while_cond, while_body);
+    auto init_stmt = IfThenElse(mid_indices.back() == 0,init_seq);
     Array<PrimExpr> indices = prefix_indices;
-    indices.push_back(mid_val);
+    indices.push_back(low_val);
     PrimExpr pivot = BufferLoad(buf, indices);
-    PrimExpr pivot_cmp_cond = left ? (pivot < val) : (pivot > val);
-    Stmt if_true = left ? BufferStore(low, mid_val + 1, {Integer(0)})
-                        : BufferStore(high, mid_val, {Integer(0)});
-    Stmt if_false = left ? BufferStore(high, mid_val, {Integer(0)})
-                         : BufferStore(low, mid_val + 1, {Integer(0)});
-    Stmt if_then_else = IfThenElse(pivot_cmp_cond, if_true, if_false);
-    SeqStmt while_body({if_then_else, mid_store_while});
-    Stmt while_ = While(while_cond, while_body);
-    Array<Stmt> body_stmts({low_store, high_store, mid_store_init, while_});
+    
+    Stmt while_ = While(pivot < val && low_val<high_val, BufferStore(low, low_val+1, {Integer(0)}));
+
+
+    PrimExpr inner_if_cond = (val == pivot && low_val<high_val);
+    Stmt true_1 = BufferStore(mid, low_val , mid_indices);
+    Stmt true_2 = BufferStore(low, low_val+1, {Integer(0)});
+
+    SeqStmt true_stmt({true_1,true_2});
+
+    Stmt else_stmt = BufferStore(mid, -1 , mid_indices);
+
+
+    auto inner_stmt = IfThenElse(inner_if_cond,true_stmt,else_stmt);
+
+    Array<Stmt> body_stmts;
+    body_stmts.push_back(init_stmt);
+    if(val.as<BufferLoadNode>()){
+      body_stmts.push_back(while_);
+    }
+    body_stmts.push_back(inner_stmt);
+
     if (minus_one) {
       body_stmts.push_back(
           BufferStore(mid, BufferLoad(mid, mid_indices) - Integer(1), mid_indices));
     }
-    if (!binary_search_vaild_check_region && check_invalid_binary_search_) {
-      Stmt then_stmt = BufferStore(mid, -1, mid_indices);
-      PrimExpr if_stmt = (pivot != val || mid_val == ub);
-      body_stmts.push_back(IfThenElse(if_stmt, then_stmt));
-    }
+    // if (!binary_search_vaild_check_region && check_invalid_binary_search_) {
+    //   Stmt then_stmt = BufferStore(mid, -1, mid_indices);
+    //   PrimExpr if_stmt = (pivot != val || mid_val == ub);
+    //   body_stmts.push_back(IfThenElse(if_stmt, then_stmt));
+    // }
     SeqStmt body(body_stmts);
 
     String name = "binary_search_block_" + std::to_string(bsearch_blk_counter);
